@@ -1,44 +1,32 @@
 #include <iostream>
 #include <iomanip>
-#include <unordered_map>
-#include <vector>
 
-#include "baker.h"
+#include <vector>
+#include <queue>
+
+#include <thread>
+#include <mutex>
+#include <functional>
+
+#include <chrono>
+
+#include "ArgumentParser.h"
+#include "PIDigitEstimator.h"
 
 using namespace std;
+using namespace std::chrono;
 
-class ArgumentParser {
-public:
-    ArgumentParser() {}
-
-    void add_argument(string key, string default_value) {
-        args[key] = default_value;
-    }
-
-    void parse_args(int argc, char* argv[]) {
-        for (int i = 1; i < argc; i+=2)
-            args[argv[i]+1] = argv[i+1];
-    }
-
-    string operator[](string key) {
-        return args[key];
-    }
-
-private:
-    unordered_map<string, string> args;
-};
-
-bool isCorrect(vector<int>& digits, int index) {
+inline bool is_correct(vector<int>& digits, int index) {
     return digits[index] / 10 == digits[index-1] % (int)(1e8);
 }
 
-int maxPrecision(vector<int>& digits) {
+inline int max_precision(vector<int>& digits) {
     for (int i = 1; i < digits.size(); i++)
-        if (!isCorrect(digits, i)) return i-1;
+        if (!is_correct(digits, i)) return i-1;
     return digits.size() - 1;
 }
 
-void printPI(vector<int>& digits) {
+void print_pi(vector<int>& digits) {
     for (int i = 0; i < digits.size(); i++) {
         if (i == 1) cout << '.';
         cout << (digits[i] / (int)(1e8));
@@ -46,18 +34,36 @@ void printPI(vector<int>& digits) {
     cout << endl;
 }
 
-void bakingPI(int n_precision) {
-    vector<int> digits(n_precision+1, 314159265);
+// using thread pooling
+void estimate_pi(int n_precision, vector<int>& digits) {
+    queue<function<void()>> tasks;
+    mutex queue_mutex;
+    
     for (int i = 1; i <= n_precision; i++) {
-        digits[i] = bake(i);
+        tasks.emplace([&, i] { PIDigitEstimator::get_nth_digit_of_pi(i, digits[i]); });
     }
 
-    int maxp = maxPrecision(digits);
-    if (maxp < n_precision) {
-        cout << "This program can only handle " << maxp << " precision." << endl;
-    } else {
-        printPI(digits);
+    vector<thread> workers(thread::hardware_concurrency());
+    for (int i = 0; i < workers.size(); i++) {
+        auto get_task = [&] (function<void()>& task) {
+            unique_lock<mutex> lock(queue_mutex);
+            if (tasks.empty()) return false;
+            task = move(tasks.front());
+            tasks.pop();
+            return true;
+        };
+        auto worker = [&] {
+            while (true) {
+                function<void()> task;
+                if (!get_task(task)) break;
+                task();
+            }
+        };
+        workers[i] = thread(worker);
     }
+
+    for (thread& worker: workers)
+        worker.join();
 }
 
 int main(int argc, char* argv[]) {
@@ -65,5 +71,21 @@ int main(int argc, char* argv[]) {
     args.add_argument("p", "100000");
     args.parse_args(argc, argv);
 
-    bakingPI(stoi(args["p"]));
+    auto start = high_resolution_clock::now();
+
+    int n_precision = stoi(args["p"]);
+    vector<int> digits(n_precision+1, 314159265);
+    estimate_pi(n_precision, digits);
+
+    int maxp = max_precision(digits);
+    if (maxp < n_precision) {
+        cout << "This program can only handle " << maxp << " precision." << endl;
+    } else {
+        print_pi(digits);
+    }
+
+    auto stop = high_resolution_clock::now();
+
+    auto duration = duration_cast<milliseconds>(stop - start);
+    cout << "Time taken: " << duration.count() / 1000.0 << " seconds" << endl;
 }
